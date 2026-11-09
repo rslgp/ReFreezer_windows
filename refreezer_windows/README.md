@@ -42,6 +42,32 @@ python -m rfw
 
 Treat the ARL like a password. If it leaks, log out of Deezer on all devices to rotate it.
 
+## Code layout
+
+```
+refreezer_windows/
+├─ run_gui.bat            double-click launcher (pythonw -m rfw)
+├─ rfw/                   the app
+│  ├─ app.py              composition root: builds and wires everything, 150 ms poll, main()
+│  ├─ deezer/             Deezer: api.py (models, Library: gw/public calls), blowfish(_tables).py
+│  ├─ core/               pure state: playqueue, tracklist, session, tasks (pool + Tk-thread queue)
+│  ├─ media/              audio: downloader (get_url, decrypt, parallel playlist), tagger,
+│  │                      stream_cache (full-track cache), player (MCI)
+│  ├─ win/                Windows glue: hotkeys (RegisterHotKey, settings, single instance), desktop
+│  ├─ services/           Tk-free controllers: account, browse, playback (queue, Flow), likes,
+│  │                      downloads, list_actions, hotkey_settings
+│  └─ ui/                 Tk views: top_bar, nav_view, track_view, menus, player_bar, tk_ui (toast),
+│                         hotkey_dialog, download_dialogs
+├─ gpm/                   vendored ARL client + genre playlist maker (Tools menu)
+└─ tests/
+   ├─ rfw/                app tests, incl. test_layers.py (layer rule below)
+   └─ gpm/                genre playlist maker tests
+```
+
+Layers import only downwards, enforced by `tests/rfw/test_layers.py`:
+`deezer`, `win` (no rfw imports) < `core`, `media` (use `deezer`) < `services` < `ui` < `app.py`.
+Only `ui/` and `app.py` import Tk; everything else is unit-tested with fakes.
+
 ## Tests
 
 ```powershell
