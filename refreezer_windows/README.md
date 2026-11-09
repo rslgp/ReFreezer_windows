@@ -22,7 +22,15 @@ playlist maker are reused from `..\genre_playlist_maker_lastfm` (vendored as `gp
 - Player: the official **30 s previews**, played through Windows MCI (`winmm.dll`).
   *Open in Deezer* hands full playback to the Deezer desktop app (`deezer://`), or the browser.
 
-Not ported: refreezer's full-track streaming playback.
+- **Full-track playback**: right-click a playlist (or Favorites) > *Play* / *Play shuffled*, or a
+  track > *Play from here*. Each track is fetched whole (MP3 128) into a temp cache and played;
+  the next one is prefetched. Player bar: ⏮ ⏯ ⏭, Shuffle, **🎲 Reroll** (new shuffle seed; type a
+  seed and press Enter to replay the same order).
+- **🌊 Flow** (menu: Flow, Motivation, Party, Chill, Melancholy, You & me, Focus) streams your
+  Deezer Flow like refreezer's `playFromSmartTrackList`, and keeps refilling with the same variant. **♥ Like** / **👎 Dislike** act on the
+  playing song (dislike also skips it).
+- **Settings > Global hotkeys**: like/dislike the playing song while the window is unfocused or
+  minimized (default `ctrl+alt+L` / `ctrl+alt+D`). Saved in `%APPDATA%\refreezer_windows\settings.json`.
 
 ## Run
 

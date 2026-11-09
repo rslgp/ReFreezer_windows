@@ -12,6 +12,19 @@ from gpm.deezer_client import STATUS_PRIVATE, DeezerClient, DeezerError
 
 PAGE_SIZE = 500
 
+# Flow variants: (label, radio.getUserRadio config_id). refreezer reads these from the
+# home page's "flow" tiles, which Deezer no longer sends to every account, so they are
+# listed here; each id was checked to return its own tracks.
+FLOW_TYPES = (
+    ("Flow", None),
+    ("Motivation", "motivation"),
+    ("Party", "party"),
+    ("Chill", "chill"),
+    ("Melancholy", "melancholy"),
+    ("You & me", "you_and_me"),
+    ("Focus", "focus"),
+)
+
 
 @dataclass(frozen=True)
 class Track:
@@ -158,6 +171,28 @@ class Library(DeezerClient):
             self.login()
         return self.playlist_tracks(self.loved_tracks_id, progress)
 
+    def smart_track_list(self, stl_id):
+        """A Deezer smart track list: (title, tracks). Flow is not one, see ``flow``."""
+        r = self.gw("deezer.pageSmartTracklist", {"smarttracklist_id": stl_id}) or {}
+        data = r.get("DATA") or {}
+        return data.get("TITLE") or "Smart track list", [Track.from_gw(j) for j in _data(r, "SONGS")]
+
+    def flow(self, config_id=None):
+        """One batch of the user's Flow (endless personal radio); call again for more.
+
+        ``config_id`` picks a variant (see FLOW_TYPES); None is the main Flow.
+        """
+        if self.user_id is None:
+            self.login()
+        # gw answers an empty batch now and then for the same request; ask again
+        for attempt in range(4):
+            r = self.gw("radio.getUserRadio", {"user_id": self.user_id, "config_id": config_id})
+            tracks = [Track.from_gw(j) for j in _data(r)]
+            if tracks:
+                return tracks
+            self._sleep(0.5 * (attempt + 1))
+        return []
+
     def album_tracks(self, album_id):
         r = self.gw("deezer.pageAlbum", {"alb_id": album_id, "header": True, "lang": self.lang})
         return [Track.from_gw(j) for j in _data(r, "SONGS")]
@@ -235,6 +270,10 @@ class Library(DeezerClient):
     def remove_favorites(self, track_ids):
         for tid in track_ids:
             self.gw("favorite_song.remove", {"SNG_ID": tid})
+
+    def dislike(self, track_id):
+        """Mark a track as disliked (Flow and recommendations stop suggesting it)."""
+        self.gw("favorite_dislike.add", {"ID": track_id, "TYPE": "song"})
 
     def remove_songs(self, playlist_id, track_ids):
         self.gw("playlist.deleteSongs", {"playlist_id": playlist_id, "songs": [[int(t), 0] for t in track_ids]})

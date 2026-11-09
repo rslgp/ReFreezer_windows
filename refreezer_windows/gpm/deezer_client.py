@@ -91,28 +91,34 @@ class DeezerClient:
         except ValueError as e:
             raise DeezerError(f"Invalid JSON from {url.split('?')[0]}") from e
 
-    def gw(self, method, params=None, _retried=False):
-        """Call the private gw-light API and return its ``results``."""
+    def gw(self, method, params=None, _retried=False, gateway_input=None):
+        """Call the private gw-light API and return its ``results``.
+
+        ``gateway_input`` (a JSON string) is what page.get needs, e.g. for the home page.
+        """
         if method == "deezer.getUserData":
             token = "null"
         else:
             if self.token is None:
                 self.login()
             token = self.token
-        qs = urllib.parse.urlencode({
+        query = {
             "api_version": "1.0",
             "api_token": token,
             "input": "3",
             "method": method,
             "cid": str(random.randint(0, 10**9)),
-        })
+        }
+        if gateway_input is not None:
+            query["gateway_input"] = gateway_input
+        qs = urllib.parse.urlencode(query)
         body = self._request(f"{GW_URL}?{qs}", data=json.dumps(params or {}).encode("utf-8"))
         err = body.get("error")
         if err:
             # Stale CSRF token: re-login once and retry, like refreezer does
             if isinstance(err, dict) and "VALID_TOKEN_REQUIRED" in err and not _retried and method != "deezer.getUserData":
                 self.token = None
-                return self.gw(method, params, _retried=True)
+                return self.gw(method, params, _retried=True, gateway_input=gateway_input)
             raise DeezerError(f"{method} failed: {err}")
         return body.get("results")
 

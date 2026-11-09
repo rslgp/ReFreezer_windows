@@ -1,13 +1,15 @@
 """ReFreezer for Windows - Tk GUI.
 
 Left: library tree (Favorites, Playlists, Albums, Artists, Search results).
-Right: the selected list. Bottom: 30 s preview player.
+Right: the selected list. Bottom: player (30 s previews, or full tracks streamed as a
+queue with seeded shuffle).
 Network calls run on a small thread pool; results come back through a queue that
 the Tk main thread polls, so widgets are only touched from the main thread.
 """
 
 import os
 import queue
+import tempfile
 import threading
 import tkinter as tk
 import webbrowser
@@ -17,14 +19,21 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from gpm.arl import find_arl, save_arl
 
-from .api import Album, Artist, Library, Playlist, Track
+from .api import FLOW_TYPES, Album, Artist, Library, Playlist, Track
 from .downloader import QUALITIES, Downloader, default_download_dir
 from .downloader_ui import DownloadPlaylistDialog, DownloadProgressDialog
+from .hotkeys import GlobalHotkeys, HotkeyError, load_settings, parse_hotkey, save_settings
 from .player import PlayerError, PreviewPlayer
+from .playqueue import PlayQueue, new_seed
 
 HEART = "♥"
+# Like button text by "playing song is in Favorites"
+LIKE_TEXT = {False: "♡ Like", True: "♥ Liked"}
 
-# Download menu: (label, refreezer quality name)
+# Full-track streaming: each track is fetched whole through the shared Downloader into
+# this cache, then played. MP3 only, since the MCI player cannot open FLAC.
+STREAM_DIR = Path(tempfile.gettempdir()) / "refreezer_windows_stream"
+STREAM_QUALITY = "MP3_128"
 
 
 def fmt_duration(seconds):
@@ -60,6 +69,19 @@ class MainWindow:
         self.q = queue.Queue()
         self.pool = ThreadPoolExecutor(max_workers=3)
         self.player = PreviewPlayer()
+        # Streaming: active PlayQueue, its own fetch pool (bg waits on these futures, so they
+        # must not share self.pool), one future per track id, and a generation counter that
+        # drops late fetch results after the user skipped ahead
+        self.playq = None
+        self.stream_pool = ThreadPoolExecutor(max_workers=2)
+        self._stream_futs = {}
+        self._play_gen = 0
+        # Flow: the queue refills itself from radio.getUserRadio (same variant) when it runs low
+        self.flow_mode = False
+        self.flow_type = None
+        self._flow_loading = False
+        self.settings = load_settings()
+        self.hotkeys = GlobalHotkeys()
         self.busy = 0
         self.favorite_ids = set()
         self.playlists, self.albums, self.artists = [], [], []
@@ -93,6 +115,9 @@ class MainWindow:
         t.add_separator()
         t.add_command(label="Open downloads folder", command=self.open_downloads_folder)
         bar.add_cascade(label="Tools", menu=t)
+        s = tk.Menu(bar, tearoff=False)
+        s.add_command(label="Global hotkeys...", command=self.open_hotkey_settings)
+        bar.add_cascade(label="Settings", menu=s)
         self.root.config(menu=bar)
 
     def _build_top(self):
@@ -161,12 +186,37 @@ class MainWindow:
         pane.add(right, weight=4)
 
     def _build_player(self):
+        ctl = ttk.Frame(self.root, padding=(8, 8, 8, 0))
+        ctl.pack(fill="x")
+        self.play_btn = ttk.Button(ctl, text="▶ Preview", command=self.play_selected)
+        self.play_btn.pack(side="left")
+        ttk.Button(ctl, text="▶ Play", command=self.play_selected_full).pack(side="left", padx=(4, 0))
+        ttk.Button(ctl, text="⏮", width=3, command=self.queue_prev).pack(side="left", padx=(8, 0))
+        ttk.Button(ctl, text="⏯", width=3, command=self.toggle_pause).pack(side="left")
+        ttk.Button(ctl, text="⏭", width=3, command=self.queue_next).pack(side="left")
+        ttk.Button(ctl, text="■ Stop", command=self.stop).pack(side="left", padx=4)
+        flow_btn = ttk.Menubutton(ctl, text="🌊 Flow")
+        flow_menu = tk.Menu(flow_btn, tearoff=False)
+        for label, flow_type in FLOW_TYPES:
+            flow_menu.add_command(label=label, command=lambda t=flow_type: self.play_flow(t))
+        flow_btn["menu"] = flow_menu
+        flow_btn.pack(side="left", padx=(8, 0))
+        self.like_btn = ttk.Button(ctl, text=LIKE_TEXT[False], width=9, command=self.like_current)
+        self.like_btn.pack(side="left", padx=(4, 0))
+        ttk.Button(ctl, text="👎 Dislike", command=self.dislike_current).pack(side="left", padx=(4, 0))
+        self.shuffle_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(ctl, text="Shuffle", variable=self.shuffle_var,
+                        command=self.on_shuffle_toggle).pack(side="left", padx=(8, 0))
+        ttk.Button(ctl, text="🎲 Reroll", command=self.reroll).pack(side="left", padx=4)
+        ttk.Label(ctl, text="Seed:").pack(side="left")
+        self.seed_var = tk.StringVar(value=str(new_seed()))
+        seed_entry = ttk.Entry(ctl, textvariable=self.seed_var, width=9)
+        seed_entry.pack(side="left", padx=4)
+        seed_entry.bind("<Return>", lambda _e: self.apply_seed())
+        ttk.Button(ctl, text="Open in Deezer", command=self.open_selected).pack(side="right")
+
         bar = ttk.Frame(self.root, padding=8)
         bar.pack(fill="x")
-        self.play_btn = ttk.Button(bar, text="▶ Preview", command=self.play_selected)
-        self.play_btn.pack(side="left")
-        ttk.Button(bar, text="■ Stop", command=self.stop).pack(side="left", padx=4)
-        ttk.Button(bar, text="Open in Deezer", command=self.open_selected).pack(side="left")
         self.now_var = tk.StringVar(value="")
         ttk.Label(bar, textvariable=self.now_var).pack(side="left", padx=10)
         self.status_var = tk.StringVar(value="Paste your ARL and click Login.")
@@ -201,6 +251,9 @@ class MainWindow:
                 if kind == "status":
                     self.status_var.set(payload)
                     continue
+                if kind == "call":  # posted from another thread (global hotkeys)
+                    cb()
+                    continue
                 self.busy -= 1
                 if self.busy <= 0:
                     self.busy = 0
@@ -212,10 +265,21 @@ class MainWindow:
                     cb(payload)
         except queue.Empty:
             pass
-        if self.player.current is not None and self.player.state() != "playing":
+        if self.player.current is not None and self.player.state() not in ("playing", "paused"):
             self.player.stop()
-            self.now_var.set("")
+            if self.playq is not None:
+                self.queue_next()  # track ended: advance the stream queue
+            else:
+                self.now_var.set("")
+        self._update_like_btn()
         self.root.after(150, self.poll)
+
+    def _update_like_btn(self):
+        """Show whether the playing song is in Favorites (any change lands here within 150 ms)."""
+        track = self._current_track()
+        text = LIKE_TEXT[track is not None and track.id in self.favorite_ids]
+        if self.like_btn.cget("text") != text:
+            self.like_btn.configure(text=text)
 
     def need_login(self):
         if self.api is None:
@@ -364,6 +428,7 @@ class MainWindow:
 
     def play(self, track):
         api, player = self.api, self.player
+        self._end_queue()
 
         def work():
             return player.fetch(api.preview_url(track), track.id)
@@ -379,8 +444,368 @@ class MainWindow:
         self.bg(work, done, f"Loading preview: {track.title}")
 
     def stop(self):
+        self._end_queue()
         self.player.stop()
         self.now_var.set("")
+
+    # ---- full-track streaming ---------------------------------------------
+
+    def _end_queue(self):
+        self.playq = None
+        self.flow_mode = False
+        self._play_gen += 1
+
+    def _seed(self):
+        """Seed from the Seed box; a bad value is replaced by a fresh one."""
+        try:
+            return int(self.seed_var.get().strip())
+        except ValueError:
+            seed = new_seed()
+            self.seed_var.set(str(seed))
+            return seed
+
+    def play_queue(self, tracks, start=None, shuffle=None):
+        """Stream ``tracks`` in full; ``start`` is the track index to play first."""
+        tracks = [t for t in tracks if isinstance(t, Track)]
+        if self.need_login() or not tracks:
+            return
+        if shuffle is not None:
+            self.shuffle_var.set(shuffle)
+        self.flow_mode = False
+        self.playq = PlayQueue(tracks, start, shuffle=self.shuffle_var.get(), seed=self._seed())
+        self._stream_current()
+
+    def play_playlist(self, playlist, shuffle=False):
+        if self.need_login():
+            return
+        if self.source[0] == "playlist" and self.source[1].id == playlist.id:
+            self.play_queue(self.items, shuffle=shuffle)
+            return
+        api = self.api
+        self.bg(lambda: api.playlist_tracks(playlist.id, self.progress),
+                lambda tracks: self.play_queue(tracks, shuffle=shuffle), f"Loading {playlist.title}...")
+
+    def play_list_from(self, track, shuffle=None):
+        """Stream the shown track list, starting at ``track``."""
+        tracks = [t for t in self.items if isinstance(t, Track)]
+        self.play_queue(tracks, tracks.index(track) if track in tracks else None, shuffle)
+
+    def play_selected_full(self):
+        sel = self.selected()
+        if sel and isinstance(sel[0], Playlist):
+            self.play_playlist(sel[0])
+        elif sel and isinstance(sel[0], Track):
+            self.play_list_from(sel[0])
+        elif self.kind == "tracks":
+            self.play_queue(self.items)
+
+    def _stream_fetch(self, track):
+        """Future for the full decrypted MP3 in the stream cache, one fetch per track."""
+        fut = self._stream_futs.get(track.id)
+        stale = fut is not None and fut.done() and (
+            fut.exception() is not None or not Path(fut.result()).exists())
+        if fut is None or stale:
+            fut = self.stream_pool.submit(
+                self.downloader.download_track, track, STREAM_DIR,
+                pref_quality=STREAM_QUALITY, save_cover=False, save_lyrics=False)
+            self._stream_futs[track.id] = fut
+        return fut
+
+    def _prune_stream_cache(self, keep_ids):
+        """Drop cached files of tracks that are neither playing nor up next."""
+        for tid, fut in list(self._stream_futs.items()):
+            if tid in keep_ids or not fut.done():
+                continue
+            del self._stream_futs[tid]
+            if fut.exception() is None:
+                try:
+                    Path(fut.result()).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def _now_label(self, track, icon="♪"):
+        return f"{icon} {track.artist} - {track.title}  [{self.playq.position_label()}]"
+
+    def _stream_current(self):
+        pq = self.playq
+        track = pq.current
+        self._play_gen += 1
+        gen = self._play_gen
+        self.player.stop()
+        self.now_var.set(self._now_label(track, "⏳"))
+        fut = self._stream_fetch(track)
+
+        def work():
+            try:
+                return fut.result()
+            except Exception as e:  # skip this track instead of stopping the queue
+                return e
+
+        def done(res):
+            if gen != self._play_gen or self.playq is not pq:
+                return  # user moved on while this was buffering
+            if isinstance(res, Exception):
+                self.status_var.set(f"Skipped {track.title}: {res}")
+                self.queue_next()
+                return
+            try:
+                self.player.play(res, track)
+            except PlayerError as e:
+                self.status_var.set(f"Skipped {track.title}: {e}")
+                self.queue_next()
+                return
+            self.now_var.set(self._now_label(track))
+            self.status_var.set("")
+            self._after_reorder()
+
+        self.bg(work, done, f"Buffering: {track.title}")
+
+    def _after_reorder(self):
+        """Prefetch the next track and free the cache of the rest."""
+        nxt = self.playq.peek_next()
+        if nxt is not None:
+            self._stream_fetch(nxt)
+        self._prune_stream_cache({self.playq.current.id, nxt.id if nxt else None})
+        self._flow_refill()
+
+    def queue_next(self):
+        if self.playq is not None and self.playq.next() is not None:
+            self._stream_current()
+        elif self.flow_mode and self.playq is not None:
+            self._flow_refill(then=self.queue_next)  # Flow never ends: fetch more, go on
+        else:
+            self.stop()
+
+    def queue_prev(self):
+        if self.playq is not None:
+            self.playq.prev()
+            self._stream_current()
+
+    def toggle_pause(self):
+        try:
+            state = self.player.state()
+            if state == "playing":
+                self.player.pause()
+            elif state == "paused":
+                self.player.resume()
+        except PlayerError as e:
+            self.status_var.set(f"Error: {e}")
+
+    def on_shuffle_toggle(self):
+        if self.playq is not None:
+            self.playq.seed = self._seed()
+            self.playq.set_shuffle(self.shuffle_var.get())
+            self._reordered()
+
+    def reroll(self):
+        """New random seed; turns shuffle on and reshuffles what is left of the queue."""
+        self.seed_var.set(str(new_seed()))
+        self.apply_seed()
+
+    def apply_seed(self):
+        seed = self._seed()
+        self.shuffle_var.set(True)
+        if self.playq is not None:
+            self.playq.reroll(seed)
+            self._reordered()
+        self.status_var.set(f"Shuffle seed {seed}")
+
+    def _reordered(self):
+        self.now_var.set(self._now_label(self.playq.current))
+        self._after_reorder()
+
+    # ---- Flow / like / dislike -------------------------------------------
+
+    def play_flow(self, flow_type=None):
+        self.play_from_smart_track_list("flow", flow_type)
+
+    def play_from_smart_track_list(self, stl_id, flow_type=None):
+        """Port of refreezer's playFromSmartTrackList: 'flow' streams the user's Flow
+        (variant ``flow_type``) and refills itself; any other id plays that smart track list."""
+        if self.need_login():
+            return
+        api = self.api
+        is_flow = stl_id == "flow"
+        name = next((label for label, t in FLOW_TYPES if t == flow_type), "Flow") if is_flow else "Smart track list"
+
+        def work():
+            if is_flow:  # Flow songs cannot be read through the smart track list call
+                return name, api.flow(flow_type)
+            return api.smart_track_list(stl_id)
+
+        def done(res):
+            title, tracks = res
+            if not tracks:
+                self.status_var.set(f"{title} returned no tracks, try again in a moment")
+                return
+            self.shuffle_var.set(False)
+            self.play_queue(tracks, shuffle=False)
+            self.flow_mode, self.flow_type = is_flow, flow_type
+            self.status_var.set(f"Playing {title}")
+
+        self.bg(work, done, f"Loading {name}...")
+
+    def _flow_refill(self, then=None):
+        """Append a Flow batch when 2 or fewer tracks are left; ``then`` runs if it added any."""
+        pq = self.playq
+        if not self.flow_mode or pq is None:
+            return
+        if then is None and (self._flow_loading or pq.remaining() > 2):
+            return
+        self._flow_loading = True
+        api, flow_type = self.api, self.flow_type
+
+        def work():
+            try:
+                return api.flow(flow_type)
+            except Exception:
+                return []
+
+        def done(tracks):
+            self._flow_loading = False
+            if self.playq is not pq:
+                return
+            before = len(pq.tracks)
+            pq.extend(tracks)
+            if len(pq.tracks) == before:
+                if then is not None:  # nothing new and nothing left: stop, don't loop
+                    self.status_var.set("Flow returned no new tracks")
+                    self.stop()
+                return
+            if then is not None:
+                then()
+            else:
+                nxt = pq.peek_next()
+                if nxt is not None:
+                    self._stream_fetch(nxt)
+
+        self.bg(work, done)
+
+    def _current_track(self):
+        if self.player.current is not None:
+            return self.player.current
+        return self.playq.current if self.playq is not None else None
+
+    def like_current(self):
+        """Add the playing song to Favorites (button and global hotkey)."""
+        track = self._current_track()
+        if track is None or self.api is None:
+            self.notify("Nothing is playing")
+            return
+        label = f"{track.artist} - {track.title}"
+        if track.id in self.favorite_ids:
+            self.notify(f"♥ Already in favorites: {label}")
+            return
+        api = self.api
+
+        def done(_):
+            self.favorite_ids.add(track.id)
+            self.render()
+            self.notify(f"♥ Liked: {label}")
+
+        self.bg(lambda: api.add_favorites([track.id]), done, "Saving...")
+
+    def dislike_current(self):
+        """Mark the playing song as disliked and skip it (button and global hotkey)."""
+        track = self._current_track()
+        if track is None or self.api is None:
+            self.notify("Nothing is playing")
+            return
+        api = self.api
+
+        def done(_):
+            self.notify(f"👎 Disliked: {track.artist} - {track.title}")
+            if self._current_track() is track:
+                if self.playq is not None:
+                    self.queue_next()
+                else:
+                    self.stop()
+
+        self.bg(lambda: api.dislike(track.id), done, "Saving...")
+
+    def notify(self, text):
+        """Status line plus a short corner toast, seen even when the window is minimized."""
+        self.status_var.set(text)
+        old = getattr(self, "_toast", None)
+        if old is not None:
+            try:
+                old.destroy()
+            except tk.TclError:
+                pass
+        toast = self._toast = tk.Toplevel(self.root)
+        toast.overrideredirect(True)
+        toast.attributes("-topmost", True)
+        tk.Label(toast, text=text, bg="#222", fg="white", padx=14, pady=8, font=("Segoe UI", 10)).pack()
+        toast.update_idletasks()
+        x = toast.winfo_screenwidth() - toast.winfo_reqwidth() - 24
+        y = toast.winfo_screenheight() - toast.winfo_reqheight() - 72
+        toast.geometry(f"+{x}+{y}")
+        toast.after(2200, toast.destroy)
+
+    # ---- settings: global hotkeys ----------------------------------------
+
+    def apply_hotkeys(self):
+        """(Re)register the like/dislike hotkeys; returns {name: error} for failures."""
+        s = self.settings
+        self.hotkeys.stop()
+        if not s.get("hotkeys_enabled"):
+            return {}
+
+        def post(fn):
+            # Runs on the hotkey thread: hand the action to the Tk thread
+            return lambda: self.q.put(("call", fn, None))
+
+        errors = self.hotkeys.start({
+            "like": (s["hotkey_like"], post(self.like_current)),
+            "dislike": (s["hotkey_dislike"], post(self.dislike_current)),
+        })
+        if errors:
+            self.status_var.set("Hotkeys: " + "; ".join(f"{k} {v}" for k, v in errors.items()))
+        return errors
+
+    def open_hotkey_settings(self):
+        win = tk.Toplevel(self.root)
+        win.title("Global hotkeys")
+        win.transient(self.root)
+        win.resizable(False, False)
+        frm = ttk.Frame(win, padding=12)
+        frm.pack(fill="both", expand=True)
+        enabled = tk.BooleanVar(value=bool(self.settings["hotkeys_enabled"]))
+        like = tk.StringVar(value=self.settings["hotkey_like"])
+        dislike = tk.StringVar(value=self.settings["hotkey_dislike"])
+        ttk.Checkbutton(frm, text="Enable global hotkeys (work while the window is unfocused or minimized)",
+                        variable=enabled).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(frm, text="Like playing song:").grid(row=1, column=0, sticky="w", pady=(8, 2))
+        ttk.Entry(frm, textvariable=like, width=22).grid(row=1, column=1, sticky="w", pady=(8, 2))
+        ttk.Label(frm, text="Dislike playing song:").grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Entry(frm, textvariable=dislike, width=22).grid(row=2, column=1, sticky="w", pady=2)
+        ttk.Label(frm, text="ctrl / alt / shift / win + one key, e.g. ctrl+alt+L, ctrl+shift+F9",
+                  foreground="#666").grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 10))
+
+        def save():
+            try:
+                keys = {parse_hotkey(like.get()), parse_hotkey(dislike.get())}
+            except HotkeyError as e:
+                messagebox.showerror("Global hotkeys", str(e), parent=win)
+                return
+            if len(keys) < 2:
+                messagebox.showerror("Global hotkeys", "Like and dislike need different keys.", parent=win)
+                return
+            self.settings.update(hotkeys_enabled=enabled.get(), hotkey_like=like.get().strip(),
+                                 hotkey_dislike=dislike.get().strip())
+            save_settings(self.settings)
+            errors = self.apply_hotkeys()
+            if errors:
+                messagebox.showwarning("Global hotkeys", "Saved, but not registered:\n" + "\n".join(
+                    f"{k}: {v}" for k, v in errors.items()), parent=win)
+                return
+            self.status_var.set("Hotkeys saved")
+            win.destroy()
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=4, column=0, columnspan=2, sticky="e")
+        ttk.Button(btns, text="Save", command=save).pack(side="left")
+        ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="left", padx=(6, 0))
 
     def open_selected(self):
         sel = self.selected()
@@ -401,6 +826,8 @@ class MainWindow:
             tracks = self.selected_tracks()
             ids = [t.id for t in tracks]
             m.add_command(label="Play preview", command=lambda: self.play(tracks[0]))
+            m.add_command(label="Play from here", command=lambda: self.play_list_from(tracks[0], False))
+            m.add_command(label="Play shuffled", command=lambda: self.play_list_from(tracks[0], True))
             m.add_command(label="Open in Deezer", command=lambda: open_in_deezer(tracks[0].url))
             m.add_command(label="Copy link", command=lambda: self.copy(tracks[0].url))
             m.add_separator()
@@ -450,6 +877,7 @@ class MainWindow:
                 title="Favorites",
                 tracks=len(self.favorite_ids),
             )
+            self._play_entries(m, fav_pl)
             self._download_entries(m, fav_pl)
         prefix, _, idx = iid.partition(":")
         if idx:
@@ -458,6 +886,10 @@ class MainWindow:
             self._library_entries(m, item)
         m.add_command(label="Refresh library", command=self.refresh_library)
         m.tk_popup(event.x_root, event.y_root)
+
+    def _play_entries(self, m, playlist):
+        m.add_command(label="Play", command=lambda: self.play_playlist(playlist))
+        m.add_command(label="Play shuffled", command=lambda: self.play_playlist(playlist, shuffle=True))
 
     def _download_entries(self, m, playlist):
         if self.download_cancel is not None:
@@ -473,6 +905,7 @@ class MainWindow:
     def _library_entries(self, m, item):
         api = self.api
         if isinstance(item, Playlist):
+            self._play_entries(m, item)
             self._download_entries(m, item)
             if api.is_own(item):
                 m.add_command(label="Delete playlist", command=lambda: self.confirm_write(
@@ -671,8 +1104,11 @@ class MainWindow:
     def quit(self):
         if self.download_cancel is not None:
             self.download_cancel.set()
-        self.player.stop()
+        self.stop()
+        self.hotkeys.stop()
         self.pool.shutdown(wait=False, cancel_futures=True)
+        self.stream_pool.shutdown(wait=False, cancel_futures=True)
+        self._prune_stream_cache(set())
         self.root.destroy()
 
 
@@ -682,7 +1118,8 @@ def main():
         ttk.Style(root).theme_use("vista")
     except tk.TclError:
         pass
-    MainWindow(root)
+    win = MainWindow(root)
+    win.apply_hotkeys()
     root.mainloop()
 
 

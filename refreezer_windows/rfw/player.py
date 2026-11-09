@@ -62,8 +62,16 @@ class PreviewPlayer:
         self._open = False
         self.current = None
 
+    def pause(self):
+        if self._open:
+            self._mci(f"pause {ALIAS}")
+
+    def resume(self):
+        if self._open:
+            self._mci(f"resume {ALIAS}")
+
     def state(self):
-        """'playing', 'stopped' (finished) or '' when nothing is open."""
+        """'playing', 'paused', 'stopped' (finished) or '' when nothing is open."""
         if not self._open:
             return ""
         try:

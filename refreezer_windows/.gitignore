@@ -1,0 +1,5 @@
+arl.txt
+.env
+__pycache__/
+*.pyc
+lastfm_api_key.txt
