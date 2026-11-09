@@ -75,11 +75,18 @@ class FakeMci:
     def __init__(self):
         self.mode = "playing"
         self.log = []
+        self.position, self.length = 0, 180_000
 
     def __call__(self, cmd):
         self.log.append(cmd)
         if cmd.startswith("status"):
+            if cmd.endswith(" position"):
+                return str(self.position)
+            if cmd.endswith(" length"):
+                return str(self.length)
             return self.mode
+        if " from " in cmd:
+            self.position = int(cmd.rsplit(" ", 1)[1])
         if cmd.startswith("pause"):
             self.mode = "paused"
         elif cmd.startswith("resume") or cmd.startswith("play"):

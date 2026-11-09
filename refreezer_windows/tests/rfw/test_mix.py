@@ -45,8 +45,10 @@ class PlaylistMixTests(unittest.TestCase):
         first = mix.next_batch(lambda tid: shared)
         second = mix.next_batch(lambda tid: shared)
         self.assertEqual([t.id for t in first], ["s0", "s1"])
-        self.assertEqual(second, [])  # same songs again: nothing new, seeds now used up
+        # the cap counts songs not queued yet, so the 2nd batch gets the one left
+        self.assertEqual([t.id for t in second], ["s2"])
         self.assertEqual(mix.remaining_seeds(), 0)
+        self.assertEqual(mix.next_batch(lambda tid: shared), [])  # seeds used up
 
     def test_seed_batches_run_in_parallel_and_failures_are_skipped(self):
         pl = tracks("p", 3)

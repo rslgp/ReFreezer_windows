@@ -74,13 +74,15 @@ def settings_path():
     return Path(base) / "refreezer_windows" / "settings.json"
 
 
-def load_settings(path=None):
+def load_settings(path=None, defaults=None):
+    """settings.json over ``defaults`` (DEFAULT_SETTINGS plus any extra keys the caller
+    owns); keys not in the defaults are dropped."""
     path = Path(path or settings_path())
-    data = dict(DEFAULT_SETTINGS)
+    data = dict(DEFAULT_SETTINGS, **(defaults or {}))
     try:
         stored = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(stored, dict):
-            data.update({k: v for k, v in stored.items() if k in DEFAULT_SETTINGS})
+            data.update({k: v for k, v in stored.items() if k in data})
     except (OSError, ValueError):
         pass
     return data

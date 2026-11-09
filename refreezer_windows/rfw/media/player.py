@@ -50,6 +50,7 @@ class PreviewPlayer:
         self.stop()
         self._mci(f'open "{path}" type mpegvideo alias {ALIAS}')
         self._open = True
+        self._mci(f"set {ALIAS} time format milliseconds")
         self._mci(f"play {ALIAS}")
         self.current = track
 
@@ -69,6 +70,31 @@ class PreviewPlayer:
     def resume(self):
         if self._open:
             self._mci(f"resume {ALIAS}")
+
+    def _status_ms(self, item):
+        if not self._open:
+            return 0
+        try:
+            return max(int(self._mci(f"status {ALIAS} {item}")), 0)
+        except (PlayerError, ValueError):
+            return 0
+
+    def position(self):
+        """Milliseconds played of the open file (0 when nothing is open)."""
+        return self._status_ms("position")
+
+    def length(self):
+        """Length of the open file in milliseconds (0 when unknown)."""
+        return self._status_ms("length")
+
+    def seek(self, ms):
+        """Jump to ``ms``; a paused track stays paused."""
+        if not self._open:
+            return
+        paused = self.state() == "paused"
+        self._mci(f"play {ALIAS} from {max(int(ms), 0)}")
+        if paused:
+            self._mci(f"pause {ALIAS}")
 
     def state(self):
         """'playing', 'paused', 'stopped' (finished) or '' when nothing is open."""

@@ -10,6 +10,12 @@ after a reshuffle.
 """
 
 import random
+from dataclasses import asdict, fields
+
+from ..deezer.api import Track
+
+# Track fields worth keeping on disk; the stream token expires, so it is fetched again
+_TRACK_FIELDS = {f.name for f in fields(Track)} - {"track_token"}
 
 
 def new_seed():
@@ -120,3 +126,28 @@ class PlayQueue:
 
     def position_label(self):
         return f"{self.pos + 1}/{len(self.order)}"
+
+    # ---- saved queue (resume after closing the app) ------------------------------
+
+    def to_dict(self):
+        """Plain data for JSON: the tracks, the order, where it is and the shuffle state."""
+        return {"tracks": [{k: v for k, v in asdict(t).items() if k in _TRACK_FIELDS} for t in self.tracks],
+                "order": list(self.order), "pos": self.pos, "shuffle": self.shuffle, "seed": self.seed,
+                "removed": sorted(self._removed)}
+
+    @classmethod
+    def from_dict(cls, data):
+        """Inverse of ``to_dict``; raises ValueError on data that does not fit."""
+        try:
+            tracks = [Track(**{k: v for k, v in t.items() if k in _TRACK_FIELDS}) for t in data["tracks"]]
+            q = cls(tracks, shuffle=bool(data.get("shuffle")), seed=data.get("seed"))
+            order = [int(i) for i in data["order"]]
+            pos = int(data["pos"])
+        except (KeyError, TypeError) as e:
+            raise ValueError(f"bad saved queue: {e}") from e
+        if not order or any(not 0 <= i < len(tracks) for i in order) or not 0 <= pos < len(order):
+            raise ValueError("bad saved queue: order out of range")
+        q.order, q.pos = order, pos
+        q._removed = {int(i) for i in data.get("removed", ()) if 0 <= int(i) < len(tracks)}
+        q.version += 1
+        return q

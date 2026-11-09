@@ -8,6 +8,15 @@ from ..deezer.api import FLOW_TYPES
 
 # Like button text by "playing song is in Favorites"
 LIKE_TEXT = {False: "♡ Like", True: "♥ Liked"}
+# Resolution of the seek bar (its value runs 0..SEEK_STEPS)
+SEEK_STEPS = 1000
+
+
+def fmt_time(ms):
+    """m:ss (h:mm:ss from an hour on)."""
+    s = max(int(ms), 0) // 1000
+    h, m = divmod(s // 60, 60)
+    return f"{h}:{m:02d}:{s % 60:02d}" if h else f"{m}:{s % 60:02d}"
 
 
 class PlayerBar:
@@ -41,6 +50,22 @@ class PlayerBar:
         seed_entry.pack(side="left", padx=4)
         seed_entry.bind("<Return>", lambda _e: playback.apply_seed())
         ttk.Button(ctl, text="Open in Deezer", command=list_actions.open_selected).pack(side="right")
+
+        # Seek bar: click or drag anywhere on it to jump in the playing song
+        seek_row = ttk.Frame(root, padding=(8, 6, 8, 0))
+        seek_row.pack(fill="x")
+        self.time_var = tk.StringVar(value=fmt_time(0))
+        ttk.Label(seek_row, textvariable=self.time_var, width=6, anchor="e").pack(side="left")
+        self.seek_var = tk.DoubleVar(value=0.0)
+        self.seek_scale = ttk.Scale(seek_row, from_=0.0, to=SEEK_STEPS, variable=self.seek_var)
+        self.seek_scale.pack(side="left", fill="x", expand=True, padx=6)
+        self.length_var = tk.StringVar(value=fmt_time(0))
+        ttk.Label(seek_row, textvariable=self.length_var, width=6).pack(side="left")
+        self._dragging = False
+        self._on_seek = playback.seek
+        self.seek_scale.bind("<ButtonPress-1>", self._seek_press)
+        self.seek_scale.bind("<B1-Motion>", self._seek_drag)
+        self.seek_scale.bind("<ButtonRelease-1>", self._seek_release)
 
         bar = ttk.Frame(root, padding=8)
         bar.pack(fill="x")
@@ -78,6 +103,39 @@ class PlayerBar:
             self.bar.start(12)
         else:
             self.bar.stop()
+
+    # ---- seek bar -----------------------------------------------------------------
+
+    def _fraction_at(self, x):
+        width = max(self.seek_scale.winfo_width(), 1)
+        return min(max(x / width, 0.0), 1.0)
+
+    def _seek_press(self, event):
+        """Jump straight to the clicked spot (ttk's default only steps toward it)."""
+        self._dragging = True
+        self.seek_var.set(self._fraction_at(event.x) * SEEK_STEPS)
+        return "break"
+
+    def _seek_drag(self, event):
+        if self._dragging:
+            self.seek_var.set(self._fraction_at(event.x) * SEEK_STEPS)
+        return "break"
+
+    def _seek_release(self, event):
+        if self._dragging:
+            self._dragging = False
+            self._on_seek(self._fraction_at(event.x))
+        return "break"
+
+    def show_progress(self, progress):
+        """``progress`` is (position ms, length ms) or None when idle; ignored mid-drag."""
+        pos, length = progress if progress else (0, 0)
+        if self._dragging:
+            pos = self.seek_var.get() / SEEK_STEPS * length
+        else:
+            self.seek_var.set(pos / length * SEEK_STEPS if length else 0.0)
+        self.time_var.set(fmt_time(pos))
+        self.length_var.set(fmt_time(length))
 
     def show_liked(self, liked):
         """Mirror "playing song is in Favorites" on the Like button."""

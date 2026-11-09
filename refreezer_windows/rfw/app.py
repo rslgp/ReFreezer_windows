@@ -13,6 +13,8 @@ import tkinter as tk
 from functools import partial
 from tkinter import messagebox, ttk
 
+from .core.mix import MIX_DEFAULTS
+from .core.queue_store import QueueStore
 from .core.session import Session
 from .core.tasks import TaskRunner
 from .core.tracklist import TrackList
@@ -22,10 +24,13 @@ from .services.downloads import DownloadsController
 from .services.hotkey_settings import HotkeyController
 from .services.likes import LikeService
 from .services.list_actions import ListActions
+from .services.mix_settings import MixSettingsController
 from .services.playback import PlaybackController
+from .services.queue_persist import QueuePersistence
 from .ui.download_dialogs import DownloadPlaylistDialog, DownloadProgressDialog
 from .ui.hotkey_dialog import open_hotkey_dialog
 from .ui.menus import ContextMenus
+from .ui.mix_dialog import open_mix_dialog
 from .ui.nav_view import NavView
 from .ui.panels import PanelDock
 from .ui.player_bar import PlayerBar
@@ -39,11 +44,12 @@ POLL_MS = 150
 
 
 class MainWindow:
-    def __init__(self, root, settings=None):
+    def __init__(self, root, settings=None, queue_store=None):
         """``settings``: the settings dict (default: loaded from settings.json); every
-        settings controller shares this one dict, so a save never drops another's keys."""
+        settings controller shares this one dict, so a save never drops another's keys.
+        ``queue_store``: where the play queue is kept between runs (default: queue.json)."""
         self.root = root
-        self.settings = load_settings() if settings is None else settings
+        self.settings = load_settings(defaults=MIX_DEFAULTS) if settings is None else settings
         root.title("ReFreezer for Windows")
         root.geometry("1360x700")
         root.minsize(960, 480)
@@ -55,7 +61,9 @@ class MainWindow:
         self.ui = TkUi(root, lambda text: self.player_bar.set_status(text))
         self.tasks = TaskRunner(on_status=self.ui.status, on_error=self.ui.task_error,
                                 on_busy=lambda busy: self.player_bar.set_busy(busy))
-        self.playback = PlaybackController(self.session, self.tasks, self.ui)
+        self.playback = PlaybackController(self.session, self.tasks, self.ui, settings=self.settings)
+        self.queue_persist = QueuePersistence(self.playback, queue_store or QueueStore(), self.ui.status)
+        self.mix_settings = MixSettingsController(self.settings)
         self.likes = LikeService(self.session, self.tasks, self.ui, self.playback, self.tracklist)
         self.browser = Browser(self.session, self.tasks, self.ui, self.tracklist,
                                on_search=lambda query, res: self.nav_view.show_search(query, res))
@@ -95,12 +103,12 @@ class MainWindow:
         self.playback.view = self.player_bar
 
         self.account = AccountController(self.session, self.tasks, self.ui, self.tracklist,
-                                         nav=self.nav_view, on_login=self.top_bar.logged_in)
+                                         nav=self.nav_view, on_login=self._logged_in)
         self.menus = ContextMenus(root, self.session, self.tracklist, self.ui, self.account, self.browser,
                                   self.list_actions, self.downloads, self.nav_view, playback=self.playback)
         self._build_menu()
         root.protocol("WM_DELETE_WINDOW", self.quit)
-        root.after(100, self.poll)
+        self._poll_id = root.after(100, self.poll)
 
     def _build_menu(self):
         bar = tk.Menu(self.root)
@@ -119,6 +127,7 @@ class MainWindow:
         s = tk.Menu(bar, tearoff=False)
         s.add_command(label="Global hotkeys...",
                       command=lambda: open_hotkey_dialog(self.root, self.hotkeys, self.ui.status))
+        s.add_command(label="Mix...", command=lambda: open_mix_dialog(self.root, self.mix_settings, self.ui.status))
         bar.add_cascade(label="Settings", menu=s)
         self.root.config(menu=bar)
 
@@ -140,16 +149,23 @@ class MainWindow:
             pane.update_idletasks()
             pane.after(30, lambda: self._place_sashes(pane))
 
+    def _logged_in(self, user_name):
+        """After login: show the account, then bring back the queue saved for it."""
+        self.top_bar.logged_in(user_name)
+        self.queue_persist.restore(self.session.api.user_id)
+
     def poll(self):
         """Tk thread, every POLL_MS: apply background results, auto-advance, mirror the Like
-        state and the play queue."""
+        state, the seek bar and the play queue, and keep the saved queue current."""
         try:
             self.tasks.drain()
             self.playback.tick()
             self.player_bar.show_liked(self.likes.current_liked())
+            self.player_bar.show_progress(self.playback.progress())
             self.queue_view.refresh(self.playback.playq)
+            self.queue_persist.tick()
         finally:  # one failing callback must not stop the loop
-            self.root.after(POLL_MS, self.poll)
+            self._poll_id = self.root.after(POLL_MS, self.poll)
 
     def open_genre_maker(self):
         from gpm.gui import App as GenreApp
@@ -158,10 +174,12 @@ class MainWindow:
             app.arl_var.set(self.top_bar.arl)
 
     def quit(self):
+        self.queue_persist.save_now()  # before shutdown stops (and clears) the queue
         self.downloads.shutdown()
         self.playback.shutdown()
         self.hotkeys.stop()
         self.tasks.shutdown()
+        self.root.after_cancel(self._poll_id)  # else it fires on a destroyed window
         self.root.destroy()
 
 

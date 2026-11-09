@@ -5,23 +5,26 @@ Tk-free. Every method runs on the Tk thread (MCI devices belong to the thread th
 them); network waits go through ``tasks.run``, whose ``on_ok`` comes back on that thread.
 ``view`` is the player bar: ``set_now(text)``, ``get_shuffle()``/``set_shuffle(on)``,
 ``get_seed()``/``set_seed(text)``.
+
+A queue restored from disk (``restore``) waits, without playing, at the saved track and
+time until the pause key (``toggle_pause``) resumes it.
 """
 
-from ..core.mix import PlaylistMix
+from ..core.mix import PlaylistMix, mix_options
 from ..core.playqueue import PlayQueue, new_seed
 from ..core.session import need_login
-from ..deezer.api import FLOW_TYPES, Track
+from ..deezer.api import FLOW_TYPES, Playlist, Track
 from ..media.player import PlayerError, PreviewPlayer
 from ..media.stream_cache import StreamCache
 
-# Endless queues (Flow, playlist mix) refill when this many tracks or fewer are left
-FLOW_REFILL_AT = 2
 
 
 class PlaybackController:
-    def __init__(self, session, tasks, ui, view=None, player=None, stream=None):
-        """``view`` may be attached later by the composition root (the bar needs this controller)."""
+    def __init__(self, session, tasks, ui, view=None, player=None, stream=None, settings=None):
+        """``view`` may be attached later by the composition root (the bar needs this controller).
+        ``settings`` is the shared settings dict (Settings > Mix keys of core.mix.MIX_DEFAULTS)."""
         self.session, self.tasks, self.ui, self.view = session, tasks, ui, view
+        self.settings = {} if settings is None else settings
         self.player = player or PreviewPlayer()
         self.stream = stream or StreamCache(lambda: session.downloader)
         self.playq = None
@@ -34,6 +37,11 @@ class PlaybackController:
         self._refill_fn = None
         self._endless_name = "Flow"
         self._flow_loading = False
+        # What the endless queue is, for saving it: {"kind": "flow", "flow_type": ...} or
+        # {"kind": "mix", "playlist_id", "title", "seed"}; None for a plain queue
+        self.endless_info = None
+        # Restored queue waiting for the pause key: start the current track at this many ms
+        self._resume_ms = None
 
     # ---- preview ------------------------------------------------------------
 
@@ -84,6 +92,9 @@ class PlaybackController:
                 self.view.set_now("")
 
     def toggle_pause(self):
+        if self.player.current is None and self._resume_ms is not None and self.playq is not None:
+            self._stream_current(start_ms=self._resume_ms)  # resume a restored queue
+            return
         try:
             state = self.player.state()
             if state == "playing":
@@ -97,7 +108,8 @@ class PlaybackController:
 
     def _end_queue(self):
         self.playq = None
-        self.flow_mode, self._refill_fn = False, None
+        self.flow_mode, self._refill_fn, self.endless_info = False, None, None
+        self._resume_ms = None
         self._play_gen += 1
 
     def _seed(self):
@@ -116,7 +128,8 @@ class PlaybackController:
             return
         if shuffle is not None:
             self.view.set_shuffle(shuffle)
-        self.flow_mode, self._refill_fn = False, None
+        self.flow_mode, self._refill_fn, self.endless_info = False, None, None
+        self._resume_ms = None
         self.playq = PlayQueue(tracks, start, shuffle=self.view.get_shuffle(), seed=self._seed())
         self._stream_current()
 
@@ -139,9 +152,11 @@ class PlaybackController:
     def _now_label(self, track, icon="♪"):
         return f"{icon} {track.artist} - {track.title}  [{self.playq.position_label()}]"
 
-    def _stream_current(self):
+    def _stream_current(self, start_ms=0):
+        """Fetch and play the queue's current track, from ``start_ms`` in."""
         pq = self.playq
         track = pq.current
+        self._resume_ms = None
         self._play_gen += 1
         gen = self._play_gen
         self.player.stop()
@@ -163,6 +178,8 @@ class PlaybackController:
                 return
             try:
                 self.player.play(res, track)
+                if start_ms:
+                    self.player.seek(start_ms)
             except PlayerError as e:
                 self.ui.status(f"Skipped {track.title}: {e}")
                 self.queue_next()
@@ -224,6 +241,86 @@ class PlaybackController:
         pq.remove(order_pos)
         self._stream_current()
 
+    # ---- seek bar ---------------------------------------------------------------
+
+    def progress(self):
+        """(position ms, length ms) of the playing track; a restored queue's saved spot
+        while it waits; None when idle."""
+        if self.player.current is not None:
+            length = self.player.length() or self.player.current.duration * 1000
+            return self.player.position(), length
+        if self._resume_ms is not None and self.playq is not None:
+            return self._resume_ms, self.playq.current.duration * 1000
+        return None
+
+    def seek(self, fraction):
+        """Jump to ``fraction`` (0..1) of the playing track (or of the waiting restored one)."""
+        prog = self.progress()
+        if prog is None or not prog[1]:
+            return
+        ms = int(min(max(fraction, 0.0), 1.0) * prog[1])
+        if self.player.current is not None:
+            try:
+                self.player.seek(min(ms, max(prog[1] - 500, 0)))  # not past the end
+            except PlayerError as e:
+                self.ui.status(f"Error: {e}")
+        else:
+            self._resume_ms = ms
+
+    # ---- saved queue (resume after closing the app) ------------------------------
+
+    def snapshot(self):
+        """The queue as plain data for JSON (None when there is none): tracks, order, the
+        playing spot in ms and what refills it."""
+        if self.playq is None:
+            return None
+        prog = self.progress()
+        return {"queue": self.playq.to_dict(), "position_ms": prog[0] if prog else 0,
+                "endless": self.endless_info}
+
+    def restore(self, data):
+        """Load a ``snapshot`` without playing; the pause key resumes at the saved time.
+        False when the data does not fit (or something already plays)."""
+        if self.playq is not None or self.player.current is not None or self.session.api is None:
+            return False
+        try:
+            pq = PlayQueue.from_dict(data["queue"])
+            position = max(int(data.get("position_ms") or 0), 0)
+        except (KeyError, TypeError, ValueError):
+            return False
+        self.playq = pq
+        self.view.set_shuffle(pq.shuffle)
+        self.view.set_seed(str(pq.seed))
+        info = data.get("endless") or {}
+        api = self.session.api
+        if info.get("kind") == "flow":
+            ft = info.get("flow_type")
+            self._make_endless(next((label for label, t in FLOW_TYPES if t == ft), "Flow"), lambda: api.flow(ft),
+                               {"kind": "flow", "flow_type": ft})
+            self.flow_type = ft
+        elif info.get("kind") == "mix" and info.get("playlist_id"):
+            self._restore_mix(info, {t.id for t in pq.tracks})
+        self._resume_ms = position
+        self.view.set_now(f"⏸ {pq.current.artist} - {pq.current.title}  [{pq.position_label()}]  "
+                          "(⏯ to continue)")
+        return True
+
+    def _restore_mix(self, info, queued_ids):
+        """Refill for a restored playlist mix: the playlist is read again on the first refill."""
+        api, settings = self.session.api, self.settings
+        playlist = Playlist(id=str(info["playlist_id"]), title=info.get("title", ""))
+        state = {}
+
+        def refill():
+            if "mix" not in state:
+                mix = PlaylistMix.from_settings(api.playlist_tracks(playlist.id), info.get("seed", 0), settings)
+                mix.exclude(queued_ids)
+                state["mix"] = mix
+            state["mix"].tune(settings)
+            return state["mix"].next_batch(api.track_mix)
+
+        self._make_endless(f"Mix: {playlist.title}", refill, dict(info))
+
     # ---- shuffle / seed -----------------------------------------------------------
 
     def on_shuffle_toggle(self):
@@ -276,7 +373,7 @@ class PlaybackController:
             self.view.set_shuffle(False)
             self.play_queue(tracks, shuffle=False)
             if is_flow:
-                self._make_endless(name, lambda: api.flow(flow_type))
+                self._make_endless(name, lambda: api.flow(flow_type), {"kind": "flow", "flow_type": flow_type})
             self.flow_type = flow_type
             self.ui.status(f"Playing {title}")
 
@@ -292,7 +389,7 @@ class PlaybackController:
 
         def work():
             tracks = loaded if loaded is not None else api.playlist_tracks(playlist.id, self.tasks.progress)
-            mix = PlaylistMix(tracks, seed)
+            mix = PlaylistMix.from_settings(tracks, seed, self.settings)
             return mix, mix.next_batch(api.track_mix)
 
         def done(res):
@@ -302,21 +399,29 @@ class PlaybackController:
                 return
             self.view.set_shuffle(False)
             self.play_queue(tracks, shuffle=False)
-            self._make_endless(name, lambda: mix.next_batch(api.track_mix))
+            settings = self.settings
+
+            def refill():
+                mix.tune(settings)
+                return mix.next_batch(api.track_mix)
+
+            self._make_endless(name, refill,
+                               {"kind": "mix", "playlist_id": playlist.id, "title": playlist.title, "seed": seed})
             self.ui.status(f"Playing {name} (seed {seed})")
 
         self.tasks.run(work, done, f"Building {name}...")
 
-    def _make_endless(self, name, refill_fn):
+    def _make_endless(self, name, refill_fn, info=None):
         self.flow_mode, self._refill_fn, self._endless_name = True, refill_fn, name
+        self.endless_info = info
 
     def _flow_refill(self, then=None):
-        """Append a batch to the endless queue when FLOW_REFILL_AT or fewer tracks are left;
-        ``then`` runs if it added any."""
+        """Append a batch to the endless queue when Settings > Mix "refill at" or fewer tracks
+        are left; ``then`` runs if it added any."""
         pq = self.playq
         if not self.flow_mode or pq is None or self._refill_fn is None:
             return
-        if then is None and (self._flow_loading or pq.remaining() > FLOW_REFILL_AT):
+        if then is None and (self._flow_loading or pq.remaining() > mix_options(self.settings)["mix_refill_at"]):
             return
         self._flow_loading = True
         refill, name = self._refill_fn, self._endless_name

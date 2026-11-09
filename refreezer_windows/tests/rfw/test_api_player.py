@@ -118,7 +118,7 @@ class PlayerTests(unittest.TestCase):
             p.play(Path(d) / "2.mp3", "track2")  # closes the previous one first
             p.stop()
             self.assertIsNone(p.current)
-        self.assertEqual([c.split()[0] for c in cmds], ["open", "play", "status", "close", "open", "play", "close"])
+        self.assertEqual([c.split()[0] for c in cmds], ["open", "set", "play", "status", "close", "open", "set", "play", "close"])
 
     def test_stop_ignores_mci_errors(self):
         def mci(cmd):

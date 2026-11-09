@@ -27,6 +27,15 @@ playlist maker are reused from `..\genre_playlist_maker_lastfm` (vendored as `gp
   the next one is prefetched. Player bar: ⏮ ⏯ ⏭, Shuffle, **🎲 Reroll** (new shuffle seed; type a
   seed and press Enter to replay the same order). Global player keys (see Settings below):
   **ctrl+alt+← previous, ctrl+alt+↓ pause/resume, ctrl+alt+→ next**.
+- **Seek bar** under the player buttons: elapsed / total time; click or drag anywhere on it to jump
+  in the playing song (a paused song stays paused).
+- **Queue kept between runs**: the play queue (order, shuffle seed, the song and the time in it,
+  and the Flow / mix it refills from) is saved to `%APPDATA%\refreezer_windows\queue.json` while
+  you listen. After you log in again with the same account it comes back paused; press ⏯ (or the
+  pause hotkey) to continue where you left. *Stop* clears it.
+- **Settings > Mix**: seed songs per refill, recommendations kept per seed song, refill threshold
+  (Flow too), seed order (Seed box or playlist order), leave out the playlist's own songs, and
+  alternate between seeds or group each seed's songs.
 - **🌊 Flow** (menu: Flow, Motivation, Party, Chill, Melancholy, You & me, Focus) streams your
   Deezer Flow like refreezer's `playFromSmartTrackList`, and keeps refilling with the same variant. **♥ Like** / **👎 Dislike** act on the
   playing song (dislike also skips it).
@@ -54,14 +63,15 @@ refreezer_windows/
 ├─ rfw/                   the app
 │  ├─ app.py              composition root: builds and wires everything, 150 ms poll, main()
 │  ├─ deezer/             Deezer: api.py (models, Library: gw/public calls), blowfish(_tables).py
-│  ├─ core/               pure state: playqueue, tracklist, session, tasks (pool + Tk-thread queue)
+│  ├─ core/               pure state: playqueue, tracklist, session, tasks (pool + Tk-thread queue),
+│  │                      mix (playlist mix + its settings), queue_store (queue.json)
 │  ├─ media/              audio: downloader (get_url, decrypt, parallel playlist), tagger,
 │  │                      stream_cache (full-track cache), player (MCI)
 │  ├─ win/                Windows glue: hotkeys (RegisterHotKey, settings, single instance), desktop
 │  ├─ services/           Tk-free controllers: account, browse, playback (queue, Flow), likes,
-│  │                      downloads, list_actions, hotkey_settings
+│  │                      downloads, list_actions, hotkey_settings, mix_settings, queue_persist
 │  └─ ui/                 Tk views: top_bar, nav_view, track_view, menus, player_bar, tk_ui (toast),
-│                         hotkey_dialog, download_dialogs
+│                         hotkey_dialog, mix_dialog, download_dialogs, queue_view, panels
 ├─ gpm/                   vendored ARL client + genre playlist maker (Tools menu)
 └─ tests/
    ├─ rfw/                app tests, incl. test_layers.py (layer rule below)
