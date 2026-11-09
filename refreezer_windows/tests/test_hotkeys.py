@@ -42,5 +42,46 @@ class SettingsTests(unittest.TestCase):
             self.assertNotIn("junk", s)
 
 
+class SingleInstanceTests(unittest.TestCase):
+    def test_second_claim_is_refused_until_first_is_released(self):
+        import ctypes
+        import uuid
+
+        from rfw.hotkeys import claim_single_instance
+
+        name = f"Local\\rfw-test-{uuid.uuid4()}"
+        first = claim_single_instance(name, window_title=f"no-such-window-{uuid.uuid4()}")
+        self.assertTrue(first)
+        self.assertIsNone(claim_single_instance(name, window_title="no-such-window"))
+        ctypes.windll.kernel32.CloseHandle(first)
+        again = claim_single_instance(name, window_title="no-such-window")
+        self.assertTrue(again)
+        ctypes.windll.kernel32.CloseHandle(again)
+
+
+class HotkeyStateTests(unittest.TestCase):
+    def test_state_line_reports_active_and_failed_keys(self):
+        try:
+            import tkinter as tk
+            root = tk.Tk()
+            root.withdraw()
+        except Exception:
+            self.skipTest("Tkinter not available")
+        from rfw.app import MainWindow
+
+        try:
+            win = MainWindow(root)
+            win.settings = dict(DEFAULT_SETTINGS)
+            self.assertEqual(win.hotkey_state(), "Not started")
+            win.hotkey_errors = {"dislike": "already used by another program (or invalid)"}
+            state = win.hotkey_state()
+            self.assertIn("Active: like ctrl+alt+L", state)
+            self.assertIn("NOT active: dislike", state)
+            win.settings["hotkeys_enabled"] = False
+            self.assertEqual(win.hotkey_state(), "Off")
+        finally:
+            root.destroy()
+
+
 if __name__ == "__main__":
     unittest.main()

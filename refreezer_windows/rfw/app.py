@@ -22,7 +22,8 @@ from gpm.arl import find_arl, save_arl
 from .api import FLOW_TYPES, Album, Artist, Library, Playlist, Track
 from .downloader import QUALITIES, Downloader, default_download_dir
 from .downloader_ui import DownloadPlaylistDialog, DownloadProgressDialog
-from .hotkeys import GlobalHotkeys, HotkeyError, load_settings, parse_hotkey, save_settings
+from .hotkeys import (GlobalHotkeys, HotkeyError, claim_single_instance, load_settings, parse_hotkey,
+                      save_settings)
 from .player import PlayerError, PreviewPlayer
 from .playqueue import PlayQueue, new_seed
 
@@ -748,6 +749,7 @@ class MainWindow:
         """(Re)register the like/dislike hotkeys; returns {name: error} for failures."""
         s = self.settings
         self.hotkeys.stop()
+        self.hotkey_errors = {}
         if not s.get("hotkeys_enabled"):
             return {}
 
@@ -759,9 +761,20 @@ class MainWindow:
             "like": (s["hotkey_like"], post(self.like_current)),
             "dislike": (s["hotkey_dislike"], post(self.dislike_current)),
         })
+        self.hotkey_errors = errors
         if errors:
             self.status_var.set("Hotkeys: " + "; ".join(f"{k} {v}" for k, v in errors.items()))
         return errors
+
+    def hotkey_state(self):
+        """One line for the settings dialog: what is registered right now."""
+        s = self.settings
+        if not s.get("hotkeys_enabled"):
+            return "Off"
+        bad = getattr(self, "hotkey_errors", {})
+        ok = [f"{n} {s['hotkey_' + n]}" for n in ("like", "dislike") if n not in bad]
+        parts = ([f"Active: {', '.join(ok)}"] if ok else []) + [f"NOT active: {n} ({e})" for n, e in bad.items()]
+        return "; ".join(parts) if self.hotkeys.running() or bad else "Not started"
 
     def open_hotkey_settings(self):
         win = tk.Toplevel(self.root)
@@ -780,7 +793,9 @@ class MainWindow:
         ttk.Label(frm, text="Dislike playing song:").grid(row=2, column=0, sticky="w", pady=2)
         ttk.Entry(frm, textvariable=dislike, width=22).grid(row=2, column=1, sticky="w", pady=2)
         ttk.Label(frm, text="ctrl / alt / shift / win + one key, e.g. ctrl+alt+L, ctrl+shift+F9",
-                  foreground="#666").grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 10))
+                  foreground="#666").grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 2))
+        ttk.Label(frm, text=f"Now: {self.hotkey_state()}", wraplength=430).grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
         def save():
             try:
@@ -803,7 +818,7 @@ class MainWindow:
             win.destroy()
 
         btns = ttk.Frame(frm)
-        btns.grid(row=4, column=0, columnspan=2, sticky="e")
+        btns.grid(row=5, column=0, columnspan=2, sticky="e")
         ttk.Button(btns, text="Save", command=save).pack(side="left")
         ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="left", padx=(6, 0))
 
@@ -1113,13 +1128,20 @@ class MainWindow:
 
 
 def main():
+    instance = claim_single_instance()
+    if instance is None:
+        return  # already running: that window was brought to the front
     root = tk.Tk()
     try:
         ttk.Style(root).theme_use("vista")
     except tk.TclError:
         pass
     win = MainWindow(root)
-    win.apply_hotkeys()
+    errors = win.apply_hotkeys()
+    if errors:
+        root.after(300, lambda: messagebox.showwarning(
+            "Global hotkeys", "These hotkeys are not active:\n" + "\n".join(
+                f"{k}: {v}" for k, v in errors.items()) + "\n\nChange them in Settings > Global hotkeys."))
     root.mainloop()
 
 

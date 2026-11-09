@@ -82,6 +82,28 @@ def save_settings(data, path=None):
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+ERROR_ALREADY_EXISTS = 183
+SW_RESTORE = 9
+
+
+def claim_single_instance(name="Local\\ReFreezerWindows", window_title="ReFreezer for Windows"):
+    """Mutex handle if this is the only running app (keep it alive); else None, after
+    bringing the running window forward. Global hotkeys belong to one process, so a second
+    copy would silently miss them while the first answered "Nothing is playing"."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    handle = kernel32.CreateMutexW(None, False, name)
+    if ctypes.get_last_error() != ERROR_ALREADY_EXISTS:
+        return handle
+    kernel32.CloseHandle(handle)
+    user32 = ctypes.windll.user32
+    hwnd = user32.FindWindowW(None, window_title)
+    if hwnd:
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.SetForegroundWindow(hwnd)
+    return None
+
+
 class GlobalHotkeys:
     """Registers {name: (hotkey text, callback)} on a background thread."""
 
@@ -131,6 +153,9 @@ class GlobalHotkeys:
         finally:
             for i in callbacks:
                 user32.UnregisterHotKey(None, i)
+
+    def running(self):
+        return self._thread is not None and self._thread.is_alive()
 
     def stop(self):
         if self._thread is not None and self._thread_id is not None:
