@@ -52,6 +52,10 @@ class ListActions:
         """Stream a playlist, reusing its tracks when they are already shown."""
         self.playback.play_playlist(playlist, shuffle, loaded=self.tracklist.tracks_of(playlist))
 
+    def play_playlist_mix(self, playlist):
+        """Endless recommendations seeded by the playlist's songs."""
+        self.playback.play_playlist_mix(playlist, loaded=self.tracklist.tracks_of(playlist))
+
     def open_selected(self):
         sel = self._selected()
         if sel:

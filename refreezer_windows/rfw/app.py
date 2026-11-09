@@ -1,8 +1,8 @@
 """ReFreezer for Windows - Tk GUI.
 
 Left: library tree (Favorites, Playlists, Albums, Artists, Search results).
-Right: the selected list. Bottom: player (30 s previews, or full tracks streamed as a
-queue with seeded shuffle).
+Middle: the selected list. Right: the play queue. Bottom: player (30 s previews, or full
+tracks streamed as a queue with seeded shuffle).
 
 ``MainWindow`` is only the composition root: it builds the Tk-free controllers (rfw.*)
 and the views (rfw.ui.*), wires them, and runs the poll loop that brings background
@@ -27,21 +27,26 @@ from .ui.download_dialogs import DownloadPlaylistDialog, DownloadProgressDialog
 from .ui.hotkey_dialog import open_hotkey_dialog
 from .ui.menus import ContextMenus
 from .ui.nav_view import NavView
+from .ui.panels import PanelDock
 from .ui.player_bar import PlayerBar
+from .ui.queue_view import QueueView
 from .ui.tk_ui import TkUi
 from .ui.top_bar import TopBar
 from .ui.track_view import TrackView
-from .win.hotkeys import claim_single_instance
+from .win.hotkeys import claim_single_instance, load_settings
 
 POLL_MS = 150
 
 
 class MainWindow:
-    def __init__(self, root):
+    def __init__(self, root, settings=None):
+        """``settings``: the settings dict (default: loaded from settings.json); every
+        settings controller shares this one dict, so a save never drops another's keys."""
         self.root = root
+        self.settings = load_settings() if settings is None else settings
         root.title("ReFreezer for Windows")
-        root.geometry("1100x680")
-        root.minsize(800, 480)
+        root.geometry("1360x700")
+        root.minsize(960, 480)
 
         # Controllers (Tk-free). Lambdas below are late-bound where a view and its
         # controller need each other; every one is resolved before the first event.
@@ -60,28 +65,39 @@ class MainWindow:
             self.session, self.tasks, self.ui, self.tracklist,
             options_dialog=partial(DownloadPlaylistDialog, parent=root),
             progress_dialog=partial(DownloadProgressDialog, root))
+        # Global hotkeys (work unfocused/minimized); previous and next only act on a stream queue
+        pb = self.playback
         self.hotkeys = HotkeyController(
-            post=self.tasks.post, status=self.ui.status,
-            actions={"like": self.likes.like_current, "dislike": self.likes.dislike_current})
+            post=self.tasks.post, status=self.ui.status, settings=self.settings,
+            actions={"like": self.likes.like_current, "dislike": self.likes.dislike_current,
+                     "prev": lambda: pb.playq is not None and pb.queue_prev(),
+                     "pause": pb.toggle_pause,
+                     "next": lambda: pb.playq is not None and pb.queue_next()})
 
         # Views, packed top to bottom
         self.top_bar = TopBar(root, on_login=lambda arl, remember: self.account.login(arl, remember),
                               on_search=self.browser.search)
         pane = ttk.Panedwindow(root, orient="horizontal")
         pane.pack(fill="both", expand=True, padx=8)
+        self.panels = PanelDock(pane, on_layout=lambda: self._relayout(pane))
         self.nav_view = NavView(pane, on_open=self.browser.open_node,
                                 on_menu=lambda event, iid: self.menus.nav_menu(event, iid))
-        pane.add(self.nav_view.frame, weight=1)
+        self.panels.add("Library", self.nav_view.frame, self.nav_view.header, weight=1)
         self.track_view = TrackView(pane, self.tracklist, on_activate=self.list_actions.activate,
                                     on_menu=lambda event, sel: self.menus.track_menu(event, sel))
-        pane.add(self.track_view.frame, weight=4)
+        self.panels.add("Tracks", self.track_view.frame, self.track_view.header, weight=4)
+        self.queue_view = QueueView(pane, on_jump=self.playback.jump_to,
+                                    on_menu=lambda event, pos, track: self.menus.queue_menu(event, pos, track))
+        self.panels.add("Queue", self.queue_view.frame, self.queue_view.header, weight=2, edge="right")
+        # Panes start at their requested widths, which squeeze the queue: place the dividers
+        pane.bind("<Configure>", lambda _e: self._place_sashes(pane), add="+")
         self.player_bar = PlayerBar(root, self.playback, self.likes, self.list_actions)
         self.playback.view = self.player_bar
 
         self.account = AccountController(self.session, self.tasks, self.ui, self.tracklist,
                                          nav=self.nav_view, on_login=self.top_bar.logged_in)
         self.menus = ContextMenus(root, self.session, self.tracklist, self.ui, self.account, self.browser,
-                                  self.list_actions, self.downloads, self.nav_view)
+                                  self.list_actions, self.downloads, self.nav_view, playback=self.playback)
         self._build_menu()
         root.protocol("WM_DELETE_WINDOW", self.quit)
         root.after(100, self.poll)
@@ -106,12 +122,32 @@ class MainWindow:
         bar.add_cascade(label="Settings", menu=s)
         self.root.config(menu=bar)
 
+    def _place_sashes(self, pane):
+        """Once, at the first real size: library ~260 px, queue a quarter of the width (>= 340 px).
+        Afterwards the user's own divider drags are kept."""
+        width = pane.winfo_width()
+        if getattr(self, "_sashes_placed", False) or width < 600:
+            return
+        self._sashes_placed = True
+        pane.sashpos(0, min(260, width // 5))
+        pane.sashpos(1, width - max(340, width // 4))
+
+    def _relayout(self, pane):
+        """After a panel toggle: all three back means the default dividers again."""
+        if self.panels.all_expanded():
+            self._sashes_placed = False
+            # Tk lays the re-inserted pane out after idle and would override an earlier sashpos
+            pane.update_idletasks()
+            pane.after(30, lambda: self._place_sashes(pane))
+
     def poll(self):
-        """Tk thread, every POLL_MS: apply background results, auto-advance, mirror the Like state."""
+        """Tk thread, every POLL_MS: apply background results, auto-advance, mirror the Like
+        state and the play queue."""
         try:
             self.tasks.drain()
             self.playback.tick()
             self.player_bar.show_liked(self.likes.current_liked())
+            self.queue_view.refresh(self.playback.playq)
         finally:  # one failing callback must not stop the loop
             self.root.after(POLL_MS, self.poll)
 

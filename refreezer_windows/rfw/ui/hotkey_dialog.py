@@ -1,9 +1,11 @@
-"""Settings > Global hotkeys dialog over a HotkeyController."""
+"""Settings > Global hotkeys dialog over a HotkeyController (like, dislike, previous,
+pause, next)."""
 
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from ..win.hotkeys import HotkeyError
+from ..services.hotkey_settings import ACTIONS, LABELS
+from ..win.hotkeys import DEFAULT_SETTINGS, HotkeyError
 
 
 def open_hotkey_dialog(root, hotkeys, status):
@@ -14,24 +16,25 @@ def open_hotkey_dialog(root, hotkeys, status):
     win.resizable(False, False)
     frm = ttk.Frame(win, padding=12)
     frm.pack(fill="both", expand=True)
-    s = hotkeys.settings
-    enabled = tk.BooleanVar(value=bool(s["hotkeys_enabled"]))
-    like = tk.StringVar(value=s["hotkey_like"])
-    dislike = tk.StringVar(value=s["hotkey_dislike"])
+    enabled = tk.BooleanVar(value=bool(hotkeys.settings["hotkeys_enabled"]))
     ttk.Checkbutton(frm, text="Enable global hotkeys (work while the window is unfocused or minimized)",
                     variable=enabled).grid(row=0, column=0, columnspan=2, sticky="w")
-    ttk.Label(frm, text="Like playing song:").grid(row=1, column=0, sticky="w", pady=(8, 2))
-    ttk.Entry(frm, textvariable=like, width=22).grid(row=1, column=1, sticky="w", pady=(8, 2))
-    ttk.Label(frm, text="Dislike playing song:").grid(row=2, column=0, sticky="w", pady=2)
-    ttk.Entry(frm, textvariable=dislike, width=22).grid(row=2, column=1, sticky="w", pady=2)
-    ttk.Label(frm, text="ctrl / alt / shift / win + one key, e.g. ctrl+alt+L, ctrl+shift+F9",
-              foreground="#666").grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 2))
-    ttk.Label(frm, text=f"Now: {hotkeys.state()}", wraplength=430).grid(
-        row=4, column=0, columnspan=2, sticky="w", pady=(0, 10))
+    fields, current = {}, hotkeys.keys()
+    for row, name in enumerate(ACTIONS, start=1):
+        pad = (8, 2) if row == 1 else (2, 2)
+        ttk.Label(frm, text=f"{LABELS[name]}:").grid(row=row, column=0, sticky="w", pady=pad)
+        fields[name] = tk.StringVar(value=current[name])
+        ttk.Entry(frm, textvariable=fields[name], width=22).grid(row=row, column=1, sticky="w", pady=pad)
+    row = len(ACTIONS) + 1
+    ttk.Label(frm, text="ctrl / alt / shift / win + one key, e.g. ctrl+alt+L, ctrl+alt+right, ctrl+shift+F9.\n"
+                        "Media keys work alone: mediaprev, mediaplaypause, medianext.",
+              foreground="#666").grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 2))
+    ttk.Label(frm, text=f"Now: {hotkeys.state()}", wraplength=460).grid(
+        row=row + 1, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
     def save():
         try:
-            errors = hotkeys.save(enabled.get(), like.get(), dislike.get())
+            errors = hotkeys.save(enabled.get(), {n: v.get() for n, v in fields.items()})
         except HotkeyError as e:
             messagebox.showerror("Global hotkeys", str(e), parent=win)
             return
@@ -42,7 +45,14 @@ def open_hotkey_dialog(root, hotkeys, status):
         status("Hotkeys saved")
         win.destroy()
 
+    def defaults():
+        for name in ACTIONS:
+            fields[name].set(DEFAULT_SETTINGS["hotkey_" + name])
+
     btns = ttk.Frame(frm)
-    btns.grid(row=5, column=0, columnspan=2, sticky="e")
+    btns.grid(row=row + 2, column=0, columnspan=2, sticky="e")
+    ttk.Button(btns, text="Defaults", command=defaults).pack(side="left", padx=(0, 12))
     ttk.Button(btns, text="Save", command=save).pack(side="left")
     ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="left", padx=(6, 0))
+    win.bind("<Escape>", lambda _e: win.destroy())
+    return win

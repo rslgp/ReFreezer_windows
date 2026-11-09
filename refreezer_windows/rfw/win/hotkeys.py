@@ -22,11 +22,17 @@ NAMED_KEYS = {
     "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28, "insert": 0x2D, "delete": 0x2E,
     "plus": 0xBB, "minus": 0xBD, "comma": 0xBC, "period": 0xBE,
 }
+# Keyboard media keys: made for this, so they may be used without a modifier
+MEDIA_KEYS = {"medianext": 0xB0, "mediaprev": 0xB1, "mediastop": 0xB2, "mediaplaypause": 0xB3}
 
 DEFAULT_SETTINGS = {
     "hotkeys_enabled": True,
     "hotkey_like": "ctrl+alt+L",
     "hotkey_dislike": "ctrl+alt+D",
+    # Player controls; a global key is taken from every program, hence the modifiers
+    "hotkey_prev": "ctrl+alt+left",
+    "hotkey_pause": "ctrl+alt+down",
+    "hotkey_next": "ctrl+alt+right",
 }
 
 
@@ -35,7 +41,8 @@ class HotkeyError(ValueError):
 
 
 def parse_hotkey(text):
-    """'ctrl+alt+L' -> (modifier flags, virtual-key code). Needs a modifier and one key."""
+    """'ctrl+alt+L' -> (modifier flags, virtual-key code). Needs a modifier and one key;
+    media keys (medianext, mediaprev, mediaplaypause, mediastop) may stand alone."""
     parts = [p.strip().lower() for p in (text or "").replace(" ", "").split("+") if p.strip()]
     mods, keys = 0, []
     for p in parts:
@@ -45,9 +52,12 @@ def parse_hotkey(text):
             keys.append(p)
     if len(keys) != 1:
         raise HotkeyError(f"'{text}': use modifiers plus exactly one key, e.g. ctrl+alt+L")
-    if not mods:
-        raise HotkeyError(f"'{text}': add at least one of ctrl, alt, shift, win")
     key = keys[0]
+    if key in MEDIA_KEYS:
+        return mods, MEDIA_KEYS[key]
+    if not mods:
+        raise HotkeyError(f"'{text}': add at least one of ctrl, alt, shift, win "
+                          "(a global key is taken from every program)")
     if len(key) == 1 and key.isalnum():
         vk = ord(key.upper())
     elif key in NAMED_KEYS:

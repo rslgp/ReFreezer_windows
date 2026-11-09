@@ -11,8 +11,14 @@ class NavView:
         """``on_open(iid)`` on selection; ``on_menu(event, iid)`` on right-click (row already selected)."""
         self._on_open, self._on_menu = on_open, on_menu
         self.frame = ttk.Frame(parent)
-        self.tree = ttk.Treeview(self.frame, show="tree", selectmode="browse")
-        sb = ttk.Scrollbar(self.frame, orient="vertical", command=self.tree.yview)
+        # Title row; the panel dock adds its collapse button here
+        self.header = ttk.Frame(self.frame)
+        self.header.pack(fill="x", pady=(0, 4))
+        ttk.Label(self.header, text="Library", font=("Segoe UI", 11, "bold")).pack(side="left")
+        body = ttk.Frame(self.frame)
+        body.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(body, show="tree", selectmode="browse")
+        sb = ttk.Scrollbar(body, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
         self.tree.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")

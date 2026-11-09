@@ -177,6 +177,11 @@ class Library(DeezerClient):
         data = r.get("DATA") or {}
         return data.get("TITLE") or "Smart track list", [Track.from_gw(j) for j in _data(r, "SONGS")]
 
+    def track_mix(self, track_id):
+        """Songs similar to ``track_id``, the seed first (refreezer playMix)."""
+        r = self.gw("song.getSearchTrackMix", {"sng_id": track_id, "start_with_input_track": "true"})
+        return [Track.from_gw(j) for j in _data(r)]
+
     def flow(self, config_id=None):
         """One batch of the user's Flow (endless personal radio); call again for more.
 

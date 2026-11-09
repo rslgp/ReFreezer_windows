@@ -1,11 +1,14 @@
-"""Global hotkey settings: register like/dislike, report their state, save changes. Tk-free.
+"""Global hotkey settings: register like/dislike and the player controls (previous, pause,
+next), report their state, save changes. Tk-free.
 
 The hotkey thread only posts the action (``post``); it runs on the Tk thread.
 """
 
 from ..win.hotkeys import GlobalHotkeys, HotkeyError, load_settings, parse_hotkey, save_settings
 
-ACTIONS = ("like", "dislike")
+ACTIONS = ("like", "dislike", "prev", "pause", "next")
+LABELS = {"like": "Like playing song", "dislike": "Dislike playing song",
+          "prev": "Previous track", "pause": "Pause / resume", "next": "Next track"}
 
 
 class HotkeyController:
@@ -15,6 +18,10 @@ class HotkeyController:
         self.hotkeys = hotkeys or GlobalHotkeys()
         self.settings = load_settings() if settings is None else settings
         self.errors = {}
+
+    def keys(self):
+        """{action: key as typed}, e.g. {'next': 'ctrl+alt+right', ...}."""
+        return {n: self.settings["hotkey_" + n] for n in ACTIONS}
 
     def apply(self):
         """(Re)register the hotkeys; returns {name: error} for failures."""
@@ -27,7 +34,7 @@ class HotkeyController:
         def posted(fn):
             return lambda: self._post(fn)  # runs on the hotkey thread
 
-        errors = self.hotkeys.start({n: (s["hotkey_" + n], posted(self._actions[n])) for n in ACTIONS})
+        errors = self.hotkeys.start({n: (k, posted(self._actions[n])) for n, k in self.keys().items()})
         self.errors = errors
         if errors:
             self._status("Hotkeys: " + "; ".join(f"{k} {v}" for k, v in errors.items()))
@@ -39,18 +46,18 @@ class HotkeyController:
         if not s.get("hotkeys_enabled"):
             return "Off"
         bad = self.errors
-        ok = [f"{n} {s['hotkey_' + n]}" for n in ACTIONS if n not in bad]
+        ok = [f"{n} {k}" for n, k in self.keys().items() if n not in bad]
         parts = ([f"Active: {', '.join(ok)}"] if ok else []) + [f"NOT active: {n} ({e})" for n, e in bad.items()]
         return "; ".join(parts) if self.hotkeys.running() or bad else "Not started"
 
-    def save(self, enabled, like, dislike):
-        """Validate, store and re-register; raises HotkeyError on a bad or repeated key.
-
-        Returns {name: error} for keys that could not be registered.
-        """
-        if len({parse_hotkey(like), parse_hotkey(dislike)}) < 2:
-            raise HotkeyError("Like and dislike need different keys.")
-        self.settings.update(hotkeys_enabled=enabled, hotkey_like=like.strip(), hotkey_dislike=dislike.strip())
+    def save(self, enabled, keys):
+        """Validate {action: key}, store and re-register; raises HotkeyError on a bad or
+        repeated key (nothing is stored then). Returns {name: error} for keys that could
+        not be registered."""
+        parsed = {n: parse_hotkey(keys[n]) for n in ACTIONS}
+        if len(set(parsed.values())) < len(ACTIONS):
+            raise HotkeyError("Each action needs its own key.")
+        self.settings.update(hotkeys_enabled=enabled, **{"hotkey_" + n: keys[n].strip() for n in ACTIONS})
         self._save(self.settings)
         return self.apply()
 

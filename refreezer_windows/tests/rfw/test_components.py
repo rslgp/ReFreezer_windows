@@ -378,8 +378,10 @@ class HotkeyControllerTests(unittest.TestCase):
     def test_hotkey_thread_only_posts_the_action(self):
         posted, liked, status, saved = [], [], [], []
         fake = self.FakeHotkeys(fail={"dislike": "already used"})
-        ctl = HotkeyController(posted.append, {"like": lambda: liked.append(1), "dislike": lambda: None},
-                               status.append, hotkeys=fake, settings=dict(DEFAULT_SETTINGS), save=saved.append)
+        actions = {"like": lambda: liked.append(1), "dislike": lambda: None,
+                   "prev": lambda: None, "pause": lambda: None, "next": lambda: None}
+        ctl = HotkeyController(posted.append, actions, status.append, hotkeys=fake,
+                               settings=dict(DEFAULT_SETTINGS), save=saved.append)
         self.assertEqual(ctl.apply(), {"dislike": "already used"})
         fake.bindings["like"][1]()  # what the hotkey thread calls
         self.assertEqual(liked, [])  # not run there...
@@ -388,7 +390,7 @@ class HotkeyControllerTests(unittest.TestCase):
         self.assertEqual(status, ["Hotkeys: dislike already used"])
         self.assertIn("NOT active: dislike", ctl.state())
         with self.assertRaises(HotkeyError):
-            ctl.save(True, "ctrl+shift+F9", "Ctrl + Shift + F9")
+            ctl.save(True, dict(ctl.keys(), like="ctrl+shift+F9", dislike="Ctrl + Shift + F9"))
         self.assertEqual(saved, [])
 
 

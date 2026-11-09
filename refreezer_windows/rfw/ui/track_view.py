@@ -12,7 +12,8 @@ class TrackView:
         on right-click (the clicked row is selected first)."""
         self.tracklist, self._on_activate, self._on_menu = tracklist, on_activate, on_menu
         self.frame = ttk.Frame(parent)
-        filt = ttk.Frame(self.frame)
+        # Title row with the filter; the panel dock adds its collapse button here
+        self.header = filt = ttk.Frame(self.frame)
         filt.pack(fill="x", pady=(0, 4))
         self.title_var = tk.StringVar(value="")
         ttk.Label(filt, textvariable=self.title_var, font=("Segoe UI", 11, "bold")).pack(side="left")
@@ -25,8 +26,9 @@ class TrackView:
         table.pack(fill="both", expand=True)
         cols = ("fav", "c1", "c2", "c3", "c4")
         self.list = ttk.Treeview(table, columns=cols, show="headings", selectmode="extended")
-        for c, w, stretch in (("fav", 28, False), ("c1", 300, True), ("c2", 200, True),
-                              ("c3", 220, True), ("c4", 60, False)):
+        # Starting widths leave room for the queue pane; stretch columns grow with the window
+        for c, w, stretch in (("fav", 28, False), ("c1", 240, True), ("c2", 150, True),
+                              ("c3", 150, True), ("c4", 50, False)):
             self.list.column(c, width=w, stretch=stretch, anchor="center" if c in ("fav", "c4") else "w")
         sb = ttk.Scrollbar(table, orient="vertical", command=self.list.yview)
         self.list.configure(yscrollcommand=sb.set)

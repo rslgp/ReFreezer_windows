@@ -3,6 +3,10 @@
 Shuffle order is ``random.Random(seed)`` over the track positions, so the same seed and
 list always give the same order; ``reroll`` draws a new seed. The track playing when the
 order changes moves to the front, so playback never jumps.
+
+``order`` positions are what the queue panel shows; ``version`` changes on every edit or
+move, so a view can redraw only when something changed. Removed tracks stay out even
+after a reshuffle.
 """
 
 import random
@@ -20,13 +24,15 @@ class PlayQueue:
             raise ValueError("Nothing to play")
         self.shuffle = shuffle
         self.seed = new_seed() if seed is None else int(seed)
+        self.version = 0
+        self._removed = set()  # track indexes taken out of the queue
         if start is not None:
             start = min(max(start, 0), len(self.tracks) - 1)
         self._arrange(start)
 
     def _arrange(self, first):
         """Rebuild the order; track index ``first`` (if given) becomes the one at ``pos``."""
-        order = list(range(len(self.tracks)))
+        order = [i for i in range(len(self.tracks)) if i not in self._removed]
         if self.shuffle:
             random.Random(self.seed).shuffle(order)
             if first is not None:
@@ -34,7 +40,8 @@ class PlayQueue:
                 order.insert(0, first)
             self.order, self.pos = order, 0
         else:
-            self.order, self.pos = order, first or 0
+            self.order, self.pos = order, order.index(first) if first is not None else 0
+        self.version += 1
 
     @property
     def current(self):
@@ -48,12 +55,44 @@ class PlayQueue:
         if self.pos + 1 >= len(self.order):
             return None
         self.pos += 1
+        self.version += 1
         return self.current
 
     def prev(self):
         if self.pos > 0:
             self.pos -= 1
+            self.version += 1
         return self.current
+
+    def entries(self):
+        """(order position, track) for every queued track, played ones included."""
+        return [(p, self.tracks[i]) for p, i in enumerate(self.order)]
+
+    def jump(self, order_pos):
+        """Make the track at ``order_pos`` the current one."""
+        self.pos = min(max(order_pos, 0), len(self.order) - 1)
+        self.version += 1
+        return self.current
+
+    def play_next(self, order_pos):
+        """Move the track at ``order_pos`` right after the current one."""
+        if order_pos == self.pos or not 0 <= order_pos < len(self.order):
+            return
+        idx = self.order.pop(order_pos)
+        if order_pos < self.pos:
+            self.pos -= 1
+        self.order.insert(self.pos + 1, idx)
+        self.version += 1
+
+    def remove(self, order_pos):
+        """Take a track that is not playing out of the queue; False for the current one."""
+        if order_pos == self.pos or not 0 <= order_pos < len(self.order):
+            return False
+        self._removed.add(self.order.pop(order_pos))
+        if order_pos < self.pos:
+            self.pos -= 1
+        self.version += 1
+        return True
 
     def extend(self, tracks):
         """Append tracks after the current order (Flow refills); duplicates are dropped."""
@@ -63,6 +102,7 @@ class PlayQueue:
                 known.add(t.id)
                 self.tracks.append(t)
                 self.order.append(len(self.tracks) - 1)
+                self.version += 1
 
     def remaining(self):
         return len(self.order) - self.pos - 1

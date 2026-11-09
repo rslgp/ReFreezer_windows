@@ -25,12 +25,16 @@ playlist maker are reused from `..\genre_playlist_maker_lastfm` (vendored as `gp
 - **Full-track playback**: right-click a playlist (or Favorites) > *Play* / *Play shuffled*, or a
   track > *Play from here*. Each track is fetched whole (MP3 128) into a temp cache and played;
   the next one is prefetched. Player bar: ⏮ ⏯ ⏭, Shuffle, **🎲 Reroll** (new shuffle seed; type a
-  seed and press Enter to replay the same order).
+  seed and press Enter to replay the same order). Global player keys (see Settings below):
+  **ctrl+alt+← previous, ctrl+alt+↓ pause/resume, ctrl+alt+→ next**.
 - **🌊 Flow** (menu: Flow, Motivation, Party, Chill, Melancholy, You & me, Focus) streams your
   Deezer Flow like refreezer's `playFromSmartTrackList`, and keeps refilling with the same variant. **♥ Like** / **👎 Dislike** act on the
   playing song (dislike also skips it).
-- **Settings > Global hotkeys**: like/dislike the playing song while the window is unfocused or
-  minimized (default `ctrl+alt+L` / `ctrl+alt+D`). Saved in `%APPDATA%\refreezer_windows\settings.json`.
+- **Settings > Global hotkeys**: work while the window is unfocused or minimized. Like / dislike the
+  playing song (default `ctrl+alt+L` / `ctrl+alt+D`) and previous / pause / next (default
+  `ctrl+alt+left` / `ctrl+alt+down` / `ctrl+alt+right`). Each key needs a modifier, because a global
+  key is taken from every program; keyboard media keys work alone (`mediaprev`, `mediaplaypause`,
+  `medianext`). Saved in `%APPDATA%\refreezer_windows\settings.json`.
 
 ## Run
 
